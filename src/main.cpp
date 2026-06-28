@@ -1,10 +1,10 @@
 /**
  * @file main.cpp
- * @brief Entry point for the ApexMatch Order Matching Engine.
+ * @brief entry point for the apexmatch order matching engine.
  * @author Abhijeet Senapati
  *
- * Initializes the OrderBook and TCP Server, registers signal handlers
- * for graceful shutdown (SIGINT / SIGTERM), and enters the server's
+ * initializes the orderbook and tcp server,registers signal handlers
+ * for graceful shutdown (sigint/sigterm),and enters the server's
  * blocking accept loop.
  */
 
@@ -16,44 +16,36 @@
 #include <memory>
 #include <cstdlib>
 
-// ═══════════════════════════════════════════════════════════════════════════════
-//  Global server pointer for signal-handler access
-// ═══════════════════════════════════════════════════════════════════════════════
+using namespace std;
 
-static std::unique_ptr<apex::Server> g_server;
-
+//global server pointer for signal-handler access
+static unique_ptr<apex::Server> g_server;
 /**
- * @brief Signal handler for graceful shutdown.
+ * @brief signal handler for graceful shutdown.
  *
- * Invoked on SIGINT (Ctrl+C) or SIGTERM. Calls Server::stop() which
+ * invoked on sigint (ctrl+c) or sigterm. calls server::stop() which
  * closes the listening socket and unblocks the accept loop.
  */
 void signalHandler(int signum) {
-    std::cout << "\n[Main] Caught signal " << signum
+    cout << "\n[Main] Caught signal " << signum
               << ". Initiating graceful shutdown...\n";
     if (g_server) {
         g_server->stop();
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-//  Main
-// ═══════════════════════════════════════════════════════════════════════════════
-
 int main() {
-    // ── Configuration ──
+    //config
     constexpr uint16_t    PORT             = 8080;
     constexpr size_t      THREAD_POOL_SIZE = 4;
     constexpr const char* SYMBOL           = "AAPL";
-
-    // -- ASCII Art Banner --
-    std::cout << R"(
+    cout << R"(
 
        _____                  __  ___      __       __
       /  _  \ ______  ___ ___/  |/  /___ _/  |_ ___\ \___
      /  /_\  \\____ \/  _/ __ \   __\   \/  _  \\   __/  _\
     /    |    \  |_> >  \_\  \/|  |  |   |  (_)  \|  | \  \_
-    \____|____/   __/ \___/____/|__|  |___|\_____/ |__|  \___\
+    \____|____/   __/ \___/____/|__|  |___|\_____ / |__|  \___\
               |__|
             ___  ___       _       _
            |   \/   | __ _| |_ ___| |__
@@ -63,38 +55,37 @@ int main() {
 
     )" << "\n";
 
-    std::cout << "      High-Concurrency Order Matching Engine\n";
-    std::cout << "      Author: Abhijeet Senapati\n";
-    std::cout << "      C++17 | Price-Time Priority | Thread Pool\n\n";
+    cout << "      High-Concurrency Order Matching Engine\n";
+    cout << "      Author: Abhijeet Senapati\n";
+    cout << "      C++17 | Price-Time Priority | Thread Pool\n\n";
 
-    // ── Register signal handlers for graceful shutdown ──
-    std::signal(SIGINT,  signalHandler);
-    std::signal(SIGTERM, signalHandler);
+    //register signal handlers for shutdown
+    signal(SIGINT,  signalHandler);
+    signal(SIGTERM, signalHandler);
 
     try {
-        // ── Initialize the Order Book ──
+        //initialize the order book
         apex::OrderBook orderBook(SYMBOL);
 
-        // ── Initialize and start the TCP Server ──
-        g_server = std::make_unique<apex::Server>(
+        //initialize and start the tcp server
+        g_server = make_unique<apex::Server>(
             PORT, THREAD_POOL_SIZE, orderBook);
 
-        std::cout << "[Main] Starting ApexMatch on port "
+        cout << "[Main] Starting ApexMatch on port "
                   << PORT << " with " << THREAD_POOL_SIZE
                   << " worker threads...\n\n";
 
-        // This call blocks until the server is stopped.
+        //this call blocks until the server is stopped.
         g_server->start();
 
-        // ── Cleanup ──
         g_server.reset();
         orderBook.shutdown();
 
-    } catch (const std::exception& e) {
-        std::cerr << "\n[FATAL] " << e.what() << "\n";
+    } catch (const exception& e) {
+        cerr << "\n[FATAL] " << e.what() << "\n";
         return EXIT_FAILURE;
     }
 
-    std::cout << "[Main] ApexMatch terminated cleanly.\n";
+    cout << "[Main] ApexMatch terminated cleanly.\n";
     return EXIT_SUCCESS;
 }

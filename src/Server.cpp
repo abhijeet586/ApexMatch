@@ -1,18 +1,18 @@
 /**
- * @file Server.cpp
- * @brief Implementation of the TCP server for ApexMatch.
+ * @file server.cpp
+ * @brief implementation of the tcp server for apexmatch.
  * @author Abhijeet Senapati
  *
- * The server uses a classic accept-dispatch model:
- *   1. Main thread binds to port, enters accept loop.
- *   2. Each accepted connection is dispatched to the ThreadPool.
- *   3. A pool worker reads commands, calls processCommand(), writes responses.
- *   4. Graceful shutdown closes the listen socket to unblock accept().
+ * the server uses a classic accept-dispatch model:
+ *   1. main thread binds to port, enters accept loop.
+ *   2. each accepted connection is dispatched to the threadpool.
+ *   3. a pool worker reads commands, calls processcommand(), writes responses.
+ *   4. graceful shutdown closes the listen socket to unblock accept().
  *
- * Telnet Compatibility Notes:
- *   - Input is buffered line-by-line (Windows Telnet sends char-at-a-time).
- *   - Telnet IAC negotiation sequences are stripped from input.
- *   - All output uses CRLF (\r\n) line endings as required by the Telnet spec.
+ * telnet compatibility notes:
+ *   - input is buffered line-by-line (windows telnet sends char-at-a-time).
+ *   - telnet iac negotiation sequences are stripped from input.
+ *   - all output uses crlf (\r\n) line endings as required by the telnet spec.
  */
 
 #include "Server.h"
@@ -23,82 +23,76 @@
 #include <algorithm>
 #include <iomanip>
 
+using namespace std;
+
 namespace apex {
-
-// =====================================================================
-//  Telnet Helpers
-// =====================================================================
-
+//telnet helpers
 /**
- * @brief Converts LF (\n) to CRLF (\r\n) for Telnet-compatible output.
- *
- * The Telnet protocol (RFC 854) requires CRLF line endings. Without the
- * carriage return, the cursor moves down but does NOT return to column 0,
- * producing a "staircase" effect in Windows Telnet.
+ * @brief converts lf (\n) to crlf (\r\n) for telnet-compatible output.
+ * the telnet protocol (rfc 854) requires crlf line endings.Without the
+ * carriage return, the cursor moves down but does not return to column 0,
+ * producing a "staircase" effect in windows telnet.
  */
-static std::string toCRLF(const std::string& input) {
-    std::string output;
-    output.reserve(input.size() + input.size() / 10);  // Slight over-alloc.
+static string toCRLF(const string& input) {
+    string output;
+    output.reserve(input.size() + input.size() / 10);//slight over-alloc.
 
     for (size_t i = 0; i < input.size(); ++i) {
         if (input[i] == '\n') {
-            // Only add \r if it's not already \r\n.
-            if (i == 0 || input[i - 1] != '\r') {
-                output += '\r';
+            //only add \r if it's not already \r\n.
+            if (i==0||input[i - 1]!='\r') {
+                output+='\r';
             }
-            output += '\n';
+            output+='\n';
         } else {
-            output += input[i];
+            output+=input[i];
         }
     }
     return output;
 }
 
 /**
- * @brief Sends a string to a socket with automatic LF -> CRLF conversion.
+ * @brief sends a string to a socket with automatic lf -> crlf conversion.
  */
-static void sendToClient(SocketType sock, const std::string& msg) {
-    std::string crlf = toCRLF(msg);
+static void sendToClient(SocketType sock, const string& msg) {
+    string crlf = toCRLF(msg);
     send(sock, crlf.c_str(), static_cast<int>(crlf.size()), 0);
 }
 
 /**
- * @brief Strips Telnet IAC (Interpret As Command) sequences from raw input.
- *
- * Windows Telnet sends negotiation bytes like 0xFF 0xFD 0x01 on connect.
- * These must be filtered out before treating the data as text input.
- * IAC sequences are 2 or 3 bytes starting with 0xFF.
+ * @brief strips telnet iac (interpret as command) sequences from raw input.
+ * windows telnet sends negotiation bytes like 0xff 0xfd 0x01 on connect.
+ * these must be filtered out before treating the data as text input.
+ * iac sequences are 2 or 3 bytes starting with 0xff.
  */
-static std::string stripTelnetIAC(const char* data, int len) {
-    std::string clean;
+static string stripTelnetIAC(const char* data, int len) {
+    string clean;
     clean.reserve(static_cast<size_t>(len));
 
-    for (int i = 0; i < len; ++i) {
-        unsigned char c = static_cast<unsigned char>(data[i]);
+    for (int i=0; i<len;++i) {
+        unsigned char c=static_cast<unsigned char>(data[i]);
 
-        if (c == 0xFF && i + 1 < len) {
+        if (c==0xFF&&i+1<len) {
             unsigned char next = static_cast<unsigned char>(data[i + 1]);
-            if (next >= 0xFB && next <= 0xFE && i + 2 < len) {
-                // 3-byte IAC: WILL/WONT/DO/DONT + option
+            if (next>=0xFB&&next<=0xFE&&i+2<len) {
+                //3-byte iac: will/wont/do/dont + option
                 i += 2;
-            } else if (next == 0xFF) {
-                // Escaped 0xFF -> literal 0xFF
-                clean += static_cast<char>(0xFF);
-                i += 1;
+            } else if (next==0xFF) {
+                //escaped 0xff -> literal 0xff
+                clean+=static_cast<char>(0xFF);
+                i+=1;
             } else {
-                // 2-byte IAC command
-                i += 1;
+                //2-byte iac command
+                i+=1;
             }
         } else {
-            clean += static_cast<char>(c);
+            clean+=static_cast<char>(c);
         }
     }
     return clean;
 }
 
-// =====================================================================
-//  Construction / Destruction
-// =====================================================================
+//construction/destruction
 
 Server::Server(uint16_t port, size_t threadPoolSize, OrderBook& book)
     : port_(port)
@@ -111,152 +105,126 @@ Server::Server(uint16_t port, size_t threadPoolSize, OrderBook& book)
 #endif
 {
 #ifdef _WIN32
-    // Initialize Windows Sockets API.
+    //initialize windows sockets api.
     WSADATA wsaData;
-    int result = WSAStartup(MAKEWORD(2, 2), &wsaData);
-    if (result != 0) {
-        throw std::runtime_error(
-            "[Server] WSAStartup failed with error: "
-            + std::to_string(result));
+    int result=WSAStartup(MAKEWORD(2,2),&wsaData);
+    if(result!=0) {
+        throw runtime_error(
+            "[Server] WSAStartup failed with error: "+to_string(result));
     }
-    wsaInitialized_ = true;
-    std::cout << "[Server] Winsock initialized.\n";
+    wsaInitialized_=true;
+    cout<<"[Server] Winsock initialized.\n";
 #endif
 }
-
 Server::~Server() {
     stop();
 #ifdef _WIN32
     if (wsaInitialized_) {
         WSACleanup();
-        std::cout << "[Server] Winsock cleaned up.\n";
+        cout << "[Server] Winsock cleaned up.\n";
     }
 #endif
 }
-
-// =====================================================================
-//  Start / Stop
-// =====================================================================
-
 void Server::start() {
-    // -- Create socket --
-    listenSocket_ = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    //creating socket
+    listenSocket_ = socket(AF_INET,SOCK_STREAM,IPPROTO_TCP);
     if (listenSocket_ == INVALID_SOCK) {
-        throw std::runtime_error("[Server] Failed to create TCP socket.");
+        throw runtime_error("[Server] Failed to create TCP socket.");
     }
-
-    // -- Set SO_REUSEADDR to avoid "address already in use" on restart --
+    //set so_reuseaddr to avoid "address already in use" on restart
     int opt = 1;
     setsockopt(listenSocket_, SOL_SOCKET, SO_REUSEADDR,
                reinterpret_cast<const char*>(&opt), sizeof(opt));
-
-    // -- Bind --
+    //bind
     sockaddr_in addr{};
     addr.sin_family      = AF_INET;
     addr.sin_addr.s_addr = INADDR_ANY;
     addr.sin_port        = htons(port_);
 
-    if (bind(listenSocket_,
+    if (::bind(listenSocket_,
              reinterpret_cast<sockaddr*>(&addr),
              sizeof(addr)) < 0) {
         closeSocket(listenSocket_);
-        throw std::runtime_error(
-            "[Server] Failed to bind to port " + std::to_string(port_)
-            + ". Is the port already in use?");
+        throw runtime_error(
+            "[Server] Failed to bind to port " + to_string(port_)+".Is the port already in use?");
     }
-
-    // -- Listen --
+    //listen
     if (listen(listenSocket_, SOMAXCONN) < 0) {
         closeSocket(listenSocket_);
-        throw std::runtime_error("[Server] Failed to listen on socket.");
+        throw runtime_error("[Server] Failed to listen on socket.");
     }
-
     running_ = true;
-
-    std::cout << "\n"
+    cout << "\n"
         << "  +------------------------------------------------+\n"
         << "  |          ApexMatch Trading Engine               |\n"
         << "  |                                                |\n"
         << "  |   Symbol:  " << orderBook_.symbol();
-    for (size_t i = orderBook_.symbol().size(); i < 36; ++i) std::cout << ' ';
-    std::cout << "|\n"
+    for (size_t i = orderBook_.symbol().size(); i < 36; ++i) cout << ' ';
+    cout << "|\n"
         << "  |   Port:    " << port_;
     {
-        std::string portStr = std::to_string(port_);
-        for (size_t i = portStr.size(); i < 36; ++i) std::cout << ' ';
+        string portStr = to_string(port_);
+        for (size_t i = portStr.size(); i < 36; ++i) cout << ' ';
     }
-    std::cout << "|\n"
+    cout << "|\n"
         << "  |   Workers: " << threadPool_.size();
     {
-        std::string wsStr = std::to_string(threadPool_.size());
-        for (size_t i = wsStr.size(); i < 36; ++i) std::cout << ' ';
+        string wsStr = to_string(threadPool_.size());
+        for (size_t i = wsStr.size(); i < 36; ++i) cout << ' ';
     }
-    std::cout << "|\n"
+    cout << "|\n"
         << "  |   Status:  LIVE - Accepting connections        |\n"
         << "  +------------------------------------------------+\n"
         << "\n"
         << "  Connect with:  telnet localhost " << port_ << "\n"
         << "            or:  ncat localhost " << port_ << "\n\n";
 
-    // Enter the accept loop (blocks until stop() is called).
+    //enter the accept loop (blocks until stop() is called).
     acceptLoop();
 }
 
 void Server::stop() {
     bool expected = true;
     if (!running_.compare_exchange_strong(expected, false)) {
-        return;  // Already stopped.
+        return;//already stopped.
     }
 
-    // Close the listening socket to break the accept() call.
+    //close the listening socket to break the accept() call.
     closeSocket(listenSocket_);
     listenSocket_ = INVALID_SOCK;
 
     threadPool_.shutdown();
-    std::cout << "[Server] Stopped.\n";
+    cout << "[Server] Stopped.\n";
 }
-
-// =====================================================================
-//  Accept Loop (main thread)
-// =====================================================================
-
+//accept loop (main thread)
 void Server::acceptLoop() {
-    while (running_.load(std::memory_order_acquire)) {
+    while (running_.load(memory_order_acquire)) {
         sockaddr_in clientAddr{};
         SockLenType addrLen = sizeof(clientAddr);
-
         SocketType clientSocket = accept(
             listenSocket_,
             reinterpret_cast<sockaddr*>(&clientAddr),
             &addrLen
         );
-
         if (clientSocket == INVALID_SOCK) {
-            if (running_.load(std::memory_order_acquire)) {
-                std::cerr << "[Server] accept() failed. Continuing...\n";
+            if (running_.load(memory_order_acquire)) {
+                cerr << "[Server] accept() failed. Continuing...\n";
             }
-            continue;  // On shutdown, listenSocket_ is closed -> accept fails.
+            continue;  //on shutdown,listensocket_ is closed->accept fails.
         }
-
-        // Log the incoming connection.
+        //log the incoming connection
         char clientIP[INET_ADDRSTRLEN] = {};
         inet_ntop(AF_INET, &clientAddr.sin_addr, clientIP, sizeof(clientIP));
-        std::cout << "[Server] New connection from "
-                  << clientIP << ":" << ntohs(clientAddr.sin_port) << "\n";
+        cout<<"[Server] New connection from "<<clientIP<<":"<< ntohs(clientAddr.sin_port)<<"\n";
 
-        // Dispatch to the thread pool -- no new thread per connection.
+        //dispatch to the thread pool - no new thread per connection
         threadPool_.enqueue([this, clientSocket]() {
             handleClient(clientSocket);
         });
     }
 }
-
-// =====================================================================
-//  Client Handler (runs in a thread pool worker)
-// =====================================================================
-
+//client handler (runs in a thread pool worker)
 void Server::handleClient(SocketType clientSocket) {
-    // -- Send welcome banner --
     sendToClient(clientSocket,
         "\n"
         "  +======================================+\n"
@@ -272,115 +240,96 @@ void Server::handleClient(SocketType clientSocket) {
         "\n"
         "apex> "
     );
-
-    // -- Line-buffered command read loop --
-    //
-    // CRITICAL: Windows Telnet sends each keystroke as a separate TCP
-    // segment (character-at-a-time mode). We must buffer incoming bytes
-    // and only process a command when we see a newline ('\n' or '\r').
-    //
     char buffer[1024];
-    std::string lineBuffer;  // Accumulates bytes until a newline arrives.
-
-    while (running_.load(std::memory_order_acquire)) {
-        std::memset(buffer, 0, sizeof(buffer));
+    string lineBuffer;//accumulates bytes until a newline arrives
+    while (running_.load(memory_order_acquire)) {
+        memset(buffer, 0, sizeof(buffer));
         int bytesRead = recv(clientSocket, buffer, sizeof(buffer) - 1, 0);
 
         if (bytesRead <= 0) {
-            // Client disconnected or error.
+            //client disconnected or error
             break;
         }
 
-        // Strip any telnet IAC negotiation sequences.
-        std::string chunk = stripTelnetIAC(buffer, bytesRead);
+        //strip any telnet iac negotiation sequences
+        string chunk=stripTelnetIAC(buffer,bytesRead);
 
-        // Append to the line buffer.
-        lineBuffer += chunk;
-
-        // Normalize: replace \r\n and standalone \r with \n.
-        // Telnet may send \r\n, \r\0, or just \r depending on the client.
+        //append to the line buffer
+        lineBuffer+=chunk;
         {
-            std::string normalized;
+            string normalized;
             normalized.reserve(lineBuffer.size());
             for (size_t i = 0; i < lineBuffer.size(); ++i) {
                 if (lineBuffer[i] == '\r') {
                     normalized += '\n';
-                    // Skip a following \n or \0 if present.
+                    //skip a following \n or \0 if present
                     if (i + 1 < lineBuffer.size() &&
                         (lineBuffer[i + 1] == '\n' || lineBuffer[i + 1] == '\0')) {
                         ++i;
                     }
                 } else if (lineBuffer[i] == '\0') {
-                    // Skip stray NUL bytes.
+                    //skip stray nul bytes
                 } else {
                     normalized += lineBuffer[i];
                 }
             }
-            lineBuffer = std::move(normalized);
+            lineBuffer = move(normalized);
         }
 
-        // Process all complete lines in the buffer.
+        //process all complete lines in the buffer
         size_t pos;
-        while ((pos = lineBuffer.find('\n')) != std::string::npos) {
-            // Extract the line (everything before the newline).
-            std::string command = lineBuffer.substr(0, pos);
+        while ((pos = lineBuffer.find('\n')) != string::npos) {
+            //extract the line(everything before the newline)
+            string command = lineBuffer.substr(0, pos);
             lineBuffer.erase(0, pos + 1);
-
-            // Strip all non-printable / control characters.
+            //strip all non-printable / control characters
             command.erase(
-                std::remove_if(command.begin(), command.end(),
+                remove_if(command.begin(), command.end(),
                     [](unsigned char c) { return c < 0x20 || c > 0x7E; }),
                 command.end());
-
-            // Skip empty lines.
+            //skip empty lines
             if (command.empty()) {
                 continue;
             }
-
-            // Uppercase for case-insensitive matching.
-            std::string upper = command;
-            std::transform(upper.begin(), upper.end(), upper.begin(),
+            //uppercase for case-insensitive matching
+            string upper = command;
+            transform(upper.begin(), upper.end(), upper.begin(),
                            [](unsigned char c) {
-                               return static_cast<char>(std::toupper(c));
+                               return static_cast<char>(toupper(c));
                            });
 
-            // -- QUIT / EXIT --
+            //exit
             if (upper == "QUIT" || upper == "EXIT") {
                 sendToClient(clientSocket, "Goodbye! Connection closed.\n");
                 closeSocket(clientSocket);
-                return;  // Exit the handler entirely.
+                return;  //exit the handler entirely.
             }
 
-            // -- Process command --
-            std::string response = processCommand(upper);
+            //process command
+            string response = processCommand(upper);
             response += "apex> ";
             sendToClient(clientSocket, response);
         }
 
-        // If lineBuffer is getting too large without a newline, flush it.
-        // This prevents a malicious client from consuming unbounded memory.
+        //if linebuffer is getting too large without a newline, flush it
+        //this prevents a malicious client from consuming unbounded memory
         if (lineBuffer.size() > 4096) {
             sendToClient(clientSocket,
                 "ERROR: Input too long. Disconnecting.\n");
             break;
         }
     }
-
     closeSocket(clientSocket);
 }
-
-// =====================================================================
-//  Command Processor
-// =====================================================================
-
-std::string Server::processCommand(const std::string& command) {
-    std::istringstream iss(command);
-    std::string token;
+//  command processor
+string Server::processCommand(const string& command) {
+    istringstream iss(command);
+    string token;
     iss >> token;
 
-    // -- SUBMIT BUY|SELL <PRICE> <QUANTITY> --
+    //submit buy|sell <price> <quantity>
     if (token == "SUBMIT") {
-        std::string sideStr;
+        string sideStr;
         double price      = 0.0;
         uint32_t quantity = 0;
 
@@ -406,19 +355,17 @@ std::string Server::processCommand(const std::string& command) {
 
         uint64_t orderId = orderBook_.submitOrder(side, price, quantity);
 
-        std::ostringstream oss;
+        ostringstream oss;
         oss << "ACK: Order #" << orderId << " accepted -- "
             << sideStr << " " << quantity << " @ "
-            << std::fixed << std::setprecision(2) << price << "\n";
+            << fixed << setprecision(2) << price << "\n";
         return oss.str();
     }
 
-    // -- VIEW --
+    //view
     if (token == "VIEW") {
         return orderBook_.viewTopOfBook();
     }
-
-    // -- HELP --
     if (token == "HELP") {
         return
             "\nAvailable commands:\n"
@@ -433,11 +380,8 @@ std::string Server::processCommand(const std::string& command) {
          + "'. Type HELP for available commands.\n";
 }
 
-// =====================================================================
-//  Utility
-// =====================================================================
-
-void Server::closeSocket(SocketType sock) {
+//utility
+void Server::closeSocket(SocketType sock){
     if (sock == INVALID_SOCK) return;
 #ifdef _WIN32
     closesocket(sock);
@@ -445,5 +389,4 @@ void Server::closeSocket(SocketType sock) {
     close(sock);
 #endif
 }
-
-} // namespace apex
+}//namespace apex
